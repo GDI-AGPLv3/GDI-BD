@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.claude/
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
+nul
+NUL
+AGENTS.md
