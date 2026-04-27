@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+.claude/
+tools/
+sql/migrations/
+*.md
+*.xlsx
+nul
+AGENTS.md
+truncate_100_test.sql
+verify_counts.sql

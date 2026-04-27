@@ -1,11 +1,36 @@
+# Environment variables (NUNCA commitear)
 .env
-.env.*
-!.env.example
-.claude/
+.env.local
+.env.*.local
+
+# Claude local settings (puede tener credenciales)
+.claude/settings.local.json
+
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Temp files
+*.tmp
+tmpclaude-*
 nul
 NUL
 AGENTS.md
