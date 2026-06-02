@@ -99,7 +99,9 @@ CREATE TYPE "public"."movement_type" AS ENUM (
   'document_link',
   'subsanacion',
   'document_proposal',
-  'document_proposal_reject'
+  'document_proposal_reject',
+  'responsible_add',
+  'responsible_remove'
 );
 
 DROP TYPE IF EXISTS "public"."status_case" CASCADE;
@@ -124,16 +126,9 @@ CREATE TYPE "public"."document_type_source" AS ENUM (
   'MEMO'
 );
 
--- Tipos de relaciones entre legajos (RLM)
-DROP TYPE IF EXISTS "public"."relation_type" CASCADE;
-CREATE TYPE "public"."relation_type" AS ENUM (
-  'parent',
-  'child',
-  'related',
-  'replaces',
-  'sibling',
-  'cousin'
-);
+-- NOTA: el enum public.relation_type fue retirado (2026-05-31).
+-- record_relations.relation_type ahora es VARCHAR(50) DEFAULT 'related',
+-- alineado con la realidad de las 4 BDs productivas (DEV/DEMO/ARG/ARIES).
 
 -- ============================================================================
 -- TABLA 1: roles
@@ -164,7 +159,7 @@ CREATE TABLE "public"."global_document_types" (
   "name" VARCHAR(100) NOT NULL,
   "acronym" VARCHAR(6) NOT NULL,
   "description" TEXT,
-  "signature_type" VARCHAR(50) DEFAULT 'required',
+  "signature_policy" VARCHAR(50) DEFAULT 'required',
   "is_visible" BOOLEAN NOT NULL DEFAULT true,  -- false = uso exclusivo interno (PV, CAEX)
   "is_active" BOOLEAN NOT NULL DEFAULT true,
   "type" "public"."document_type_source" NOT NULL DEFAULT 'HTML',

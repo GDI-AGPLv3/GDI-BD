@@ -16,8 +16,14 @@
 -- ##     1. Aplicar el MISMO cambio en 03-create-web-schema.sql             ##
 -- ##     2. Si afecta seeds: tambien editar web_create_schema.py            ##
 -- ##                                                                        ##
--- ##   NO HAY SYNC AUTOMATICO. Drift = municipios nuevos con estructura     ##
--- ##   diferente segun el camino usado. Ver docs/drift-audit si pasa.       ##
+-- ##   CHEQUEO DE DRIFT (corre en CI y local):                              ##
+-- ##     python tools/check_template_drift.py                               ##
+-- ##   Compara el DDL de tenant (tablas/columnas/constraints/indices/       ##
+-- ##   triggers) entre ambos archivos y FALLA si divergen. NO unifica la    ##
+-- ##   duplicacion (es intencional), solo avisa cuando se desincronizan.    ##
+-- ##                                                                        ##
+-- ##   Drift = municipios nuevos con estructura diferente segun el camino   ##
+-- ##   usado (ya rompio 3 municipios con memo_recipients).                  ##
 -- ##                                                                        ##
 -- ############################################################################
 
@@ -50,6 +56,25 @@
 -- SECCION 1: SCHEMA MUNICIPIO
 -- ============================================================================
 
+-- !! GUARD: Proteccion contra DROP accidental de schemas criticos !!
+-- Si {SCHEMA_NAME} pertenece a la lista de schemas protegidos, el script
+-- aborta con RAISE EXCEPTION antes de ejecutar cualquier DROP.
+DO $$
+BEGIN
+    IF '{SCHEMA_NAME}' = ANY(ARRAY[
+        'public', 'information_schema', 'pg_catalog', 'pg_toast',
+        -- Agrega aqui los schemas de produccion que quieras proteger:
+        '100_example', '101_example'
+    ]) THEN
+        RAISE EXCEPTION
+            'ABORTADO: el schema "%" esta en la lista de schemas protegidos. '
+            'Si realmente queres recrearlo, edita manualmente la lista PROTECTED_SCHEMAS '
+            'en 03-create-municipio.sql y ejecuta bajo tu responsabilidad.',
+            '{SCHEMA_NAME}';
+    END IF;
+END;
+$$;
+
 DROP SCHEMA IF EXISTS "{SCHEMA_NAME}" CASCADE;
 
 CREATE SCHEMA "{SCHEMA_NAME}";
@@ -60,7 +85,6 @@ CREATE SCHEMA "{SCHEMA_NAME}";
 --   - public.movement_type
 --   - public.status_case
 --   - public.case_creation_channel
---   - public.relation_type
 
 -- ============================================================================
 -- GRUPO A: ESTRUCTURA ORGANIZACIONAL
@@ -229,7 +253,7 @@ CREATE TABLE "{SCHEMA_NAME}"."document_types" (
   "name" VARCHAR(100) NOT NULL,
   "acronym" VARCHAR(6) NOT NULL,
   "description" TEXT,
-  "required_signature" VARCHAR(50),
+  "signature_policy" TEXT NOT NULL DEFAULT 'electronic',
   "is_active" BOOLEAN NOT NULL DEFAULT true,
   "type" "public"."document_type_source" NOT NULL DEFAULT 'HTML',
   "trust" BOOLEAN NOT NULL DEFAULT true,
@@ -238,6 +262,7 @@ CREATE TABLE "{SCHEMA_NAME}"."document_types" (
   "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT "document_types_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "document_types_acronym_unique" UNIQUE ("acronym"),
+  CONSTRAINT "document_types_signature_policy_chk" CHECK (signature_policy IN ('electronic','digital_all','digital_num')),
   CONSTRAINT "document_types_global_fkey" FOREIGN KEY ("global_document_type_id") REFERENCES "public"."global_document_types" ("id")
 );
 
@@ -302,6 +327,10 @@ CREATE TABLE "{SCHEMA_NAME}"."document_signers" (
   "signing_order" INT,
   "status" "public"."document_signer_status" NOT NULL DEFAULT 'pending',
   "signed_at" TIMESTAMPTZ,
+  "signed_with_provider"   text DEFAULT NULL,
+  "cert_serial"            text DEFAULT NULL,
+  "cert_subject_cuit"      text DEFAULT NULL,
+  "signature_session_id"   text DEFAULT NULL,
   "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT "document_signers_pkey" PRIMARY KEY ("id"),
@@ -518,8 +547,12 @@ CREATE TABLE "{SCHEMA_NAME}"."document_chunks" (
   "official_document_id" UUID NOT NULL,
   "chunk_index" INTEGER NOT NULL,
   "chunk_text" TEXT NOT NULL,
+  "text_for_embedding" TEXT,
   "embedding" vector(1536),
   "embedding_model" VARCHAR(100) NOT NULL DEFAULT 'text-embedding-3-small',
+  "content_tsv" tsvector GENERATED ALWAYS AS (
+    to_tsvector('spanish', coalesce(text_for_embedding, chunk_text, ''))
+  ) STORED,
   "indexed_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT "document_chunks_pkey" PRIMARY KEY ("id"),
@@ -652,7 +685,7 @@ COMMENT ON TABLE "{SCHEMA_NAME}"."registry_family_permissions" IS 'Permisos de s
 CREATE TABLE "{SCHEMA_NAME}"."records" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "record_number" VARCHAR(50) NOT NULL,
-  "display_name" VARCHAR(200) NOT NULL,
+  "display_name" VARCHAR(200),
   "registry_family_id" UUID NOT NULL,
   "data" JSONB DEFAULT '{}',
   "state" VARCHAR(50) DEFAULT 'Activo',
@@ -697,7 +730,7 @@ CREATE TABLE "{SCHEMA_NAME}"."record_relations" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "source_record_id" UUID NOT NULL,
   "target_record_id" UUID NOT NULL,
-  "relation_type" "public"."relation_type" NOT NULL DEFAULT 'related',
+  "relation_type" VARCHAR(50) DEFAULT 'related',
   "notes" TEXT,
   "created_by_user_id" UUID NOT NULL,
   "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -748,6 +781,50 @@ CREATE TABLE "{SCHEMA_NAME}"."record_document_links" (
 COMMENT ON TABLE "{SCHEMA_NAME}"."record_document_links" IS 'Vinculos entre registros y documentos (draft u oficial)';
 
 -- ============================================================================
+-- GRUPO J: RESPONSABLES Y FAVORITOS DE EXPEDIENTE
+-- ============================================================================
+
+-- TABLA 34: case_responsibles (responsables asignados a expedientes)
+-- Un expediente tiene un ADMIN (único activo) y puede tener múltiples ADDITIONAL.
+CREATE TABLE "{SCHEMA_NAME}"."case_responsibles" (
+  "id"         UUID        NOT NULL DEFAULT gen_random_uuid(),
+  "case_id"    UUID        NOT NULL,
+  "user_id"    UUID        NOT NULL,
+  "sector_id"  UUID        NOT NULL,
+  "type"       VARCHAR(20) NOT NULL CHECK ("type" IN ('ADMIN', 'ADDITIONAL')),
+  "added_by"   UUID        NOT NULL,
+  "added_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "removed_by" UUID,
+  "removed_at" TIMESTAMPTZ,
+  "is_active"  BOOLEAN     NOT NULL DEFAULT true,
+  "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT "cr_pkey"          PRIMARY KEY ("id"),
+  CONSTRAINT "cr_case_fkey"     FOREIGN KEY ("case_id")   REFERENCES "{SCHEMA_NAME}"."cases" ("id"),
+  CONSTRAINT "cr_user_fkey"     FOREIGN KEY ("user_id")   REFERENCES "{SCHEMA_NAME}"."users" ("id"),
+  CONSTRAINT "cr_sector_fkey"   FOREIGN KEY ("sector_id") REFERENCES "{SCHEMA_NAME}"."sectors" ("id"),
+  CONSTRAINT "cr_added_by_fkey" FOREIGN KEY ("added_by")  REFERENCES "{SCHEMA_NAME}"."users" ("id")
+);
+
+COMMENT ON TABLE "{SCHEMA_NAME}"."case_responsibles" IS 'Responsables asignados a expedientes (ADMIN único activo + ADDITIONAL ilimitados)';
+COMMENT ON COLUMN "{SCHEMA_NAME}"."case_responsibles"."type" IS 'ADMIN = responsable principal (único activo por expediente), ADDITIONAL = responsable adicional';
+
+-- TABLA 35: case_favorites (expedientes marcados como favoritos por usuario)
+-- Una fila por (user_id, case_id). ON DELETE CASCADE en ambas FKs.
+CREATE TABLE "{SCHEMA_NAME}"."case_favorites" (
+  "id"         UUID        NOT NULL DEFAULT gen_random_uuid(),
+  "user_id"    UUID        NOT NULL,
+  "case_id"    UUID        NOT NULL,
+  "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "updated_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT "cf_pkey"      PRIMARY KEY ("id"),
+  CONSTRAINT "cf_user_fkey" FOREIGN KEY ("user_id") REFERENCES "{SCHEMA_NAME}"."users" ("id") ON DELETE CASCADE,
+  CONSTRAINT "cf_case_fkey" FOREIGN KEY ("case_id") REFERENCES "{SCHEMA_NAME}"."cases" ("id") ON DELETE CASCADE,
+  CONSTRAINT "cf_unique"    UNIQUE ("user_id", "case_id")
+);
+
+COMMENT ON TABLE "{SCHEMA_NAME}"."case_favorites" IS 'Expedientes marcados como favoritos por cada usuario';
+
+-- ============================================================================
 -- INDICES
 -- ============================================================================
 
@@ -760,17 +837,32 @@ CREATE INDEX "idx_{SCHEMA_NAME}_document_draft_status" ON "{SCHEMA_NAME}"."docum
 CREATE INDEX "idx_{SCHEMA_NAME}_document_draft_created_by" ON "{SCHEMA_NAME}"."document_draft" ("created_by");
 CREATE INDEX "idx_{SCHEMA_NAME}_document_draft_type" ON "{SCHEMA_NAME}"."document_draft" ("document_type_id");
 CREATE INDEX "idx_{SCHEMA_NAME}_document_draft_created_by_date" ON "{SCHEMA_NAME}"."document_draft" ("created_by", "created_at" DESC);
+-- Mig 059: índice parcial para polling del AIWorker (documentos sin resumen)
+CREATE INDEX "idx_{SCHEMA_NAME}_document_draft_resume_null" ON "{SCHEMA_NAME}"."document_draft" ("id") WHERE "resume" IS NULL;
 
 -- document_signers: tabla de alta frecuencia (buscar firmantes, docs pendientes)
 CREATE INDEX "idx_{SCHEMA_NAME}_doc_signers_document" ON "{SCHEMA_NAME}"."document_signers" ("document_id");
 CREATE INDEX "idx_{SCHEMA_NAME}_doc_signers_user" ON "{SCHEMA_NAME}"."document_signers" ("user_id");
 CREATE INDEX "idx_{SCHEMA_NAME}_doc_signers_status" ON "{SCHEMA_NAME}"."document_signers" ("status");
 
+-- document_signers: indices parciales para firma digital (Fase 2 NuevaFIRMAfull)
+CREATE INDEX "idx_{SCHEMA_NAME}_document_signers_session_id"
+    ON "{SCHEMA_NAME}"."document_signers" ("signature_session_id")
+    WHERE "signature_session_id" IS NOT NULL;
+CREATE INDEX "idx_{SCHEMA_NAME}_document_signers_cert_serial"
+    ON "{SCHEMA_NAME}"."document_signers" ("cert_serial")
+    WHERE "cert_serial" IS NOT NULL;
+CREATE INDEX "idx_{SCHEMA_NAME}_document_signers_provider"
+    ON "{SCHEMA_NAME}"."document_signers" ("signed_with_provider")
+    WHERE "signed_with_provider" IS NOT NULL;
+
 -- official_documents: búsqueda por número, fecha, departamento
 CREATE INDEX "idx_{SCHEMA_NAME}_official_docs_signer_sectors" ON "{SCHEMA_NAME}"."official_documents" USING GIN ("signer_sector_ids");
 CREATE INDEX "idx_{SCHEMA_NAME}_official_docs_number" ON "{SCHEMA_NAME}"."official_documents" ("official_number");
 CREATE INDEX "idx_{SCHEMA_NAME}_official_docs_signed_at" ON "{SCHEMA_NAME}"."official_documents" ("signed_at" DESC);
 CREATE INDEX "idx_{SCHEMA_NAME}_official_docs_department" ON "{SCHEMA_NAME}"."official_documents" ("department_id");
+-- Mig 059: índice parcial para polling del AIWorker (documentos sin resumen)
+CREATE INDEX "idx_{SCHEMA_NAME}_official_documents_resume_null" ON "{SCHEMA_NAME}"."official_documents" ("id") WHERE "resume" IS NULL;
 
 -- Grupo E: Expedientes
 CREATE INDEX "idx_{SCHEMA_NAME}_cases_status" ON "{SCHEMA_NAME}"."cases" ("status");
@@ -824,6 +916,10 @@ CREATE INDEX "idx_{SCHEMA_NAME}_chunks_doc" ON "{SCHEMA_NAME}"."document_chunks"
 -- Indice vectorial HNSW para búsqueda semántica
 CREATE INDEX "idx_{SCHEMA_NAME}_chunks_embedding" ON "{SCHEMA_NAME}"."document_chunks"
     USING hnsw ("embedding" vector_cosine_ops);
+
+-- Indice GIN para BM25 (Hybrid Search)
+CREATE INDEX "idx_{SCHEMA_NAME}_chunks_content_tsv" ON "{SCHEMA_NAME}"."document_chunks"
+    USING GIN ("content_tsv");
 
 -- Grupo H: Notas
 CREATE INDEX "idx_{SCHEMA_NAME}_notes_recipients_document" ON "{SCHEMA_NAME}"."notes_recipients" ("document_id");
@@ -883,8 +979,35 @@ CREATE INDEX "idx_{SCHEMA_NAME}_official_docs_reserved_at"
 CREATE UNIQUE INDEX "idx_{SCHEMA_NAME}_departments_acronym_active"
   ON "{SCHEMA_NAME}"."departments" ("acronym")
   WHERE is_active = true AND acronym IS NOT NULL;
+-- Mig 060: índice en departments.head_user_id (queries "departamentos por jefe")
+CREATE INDEX "idx_{SCHEMA_NAME}_departments_head_user_id" ON "{SCHEMA_NAME}"."departments" ("head_user_id");
 
--- Grupo SYNC: Índices en updated_at para backup incremental (23 tablas)
+-- Grupo J: Responsables y Favoritos de Expediente
+
+-- case_responsibles: un ADMIN activo por expediente (UNIQUE parcial)
+CREATE UNIQUE INDEX "idx_{SCHEMA_NAME}_cr_unique_admin"
+  ON "{SCHEMA_NAME}"."case_responsibles" ("case_id")
+  WHERE "type" = 'ADMIN' AND "is_active" = true;
+
+-- case_responsibles: búsqueda por expediente + estado activo
+CREATE INDEX "idx_{SCHEMA_NAME}_cr_case_active"
+  ON "{SCHEMA_NAME}"."case_responsibles" ("case_id", "is_active");
+
+-- case_responsibles: responsables activos de un usuario
+CREATE INDEX "idx_{SCHEMA_NAME}_cr_user"
+  ON "{SCHEMA_NAME}"."case_responsibles" ("user_id")
+  WHERE "is_active" = true;
+
+-- case_responsibles: responsables activos de un sector
+CREATE INDEX "idx_{SCHEMA_NAME}_cr_sector"
+  ON "{SCHEMA_NAME}"."case_responsibles" ("sector_id")
+  WHERE "is_active" = true;
+
+-- case_favorites: favoritos de un usuario ordenados por fecha
+CREATE INDEX "idx_{SCHEMA_NAME}_case_favorites_user"
+  ON "{SCHEMA_NAME}"."case_favorites" ("user_id", "created_at" DESC);
+
+-- Grupo SYNC: Índices en updated_at para backup incremental (33 tablas)
 CREATE INDEX "idx_{SCHEMA_NAME}_departments_updated_at" ON "{SCHEMA_NAME}"."departments"("updated_at");
 CREATE INDEX "idx_{SCHEMA_NAME}_sectors_updated_at" ON "{SCHEMA_NAME}"."sectors"("updated_at");
 CREATE INDEX "idx_{SCHEMA_NAME}_ranks_updated_at" ON "{SCHEMA_NAME}"."ranks"("updated_at");
@@ -909,6 +1032,15 @@ CREATE INDEX "idx_{SCHEMA_NAME}_document_rejections_updated_at" ON "{SCHEMA_NAME
 CREATE INDEX "idx_{SCHEMA_NAME}_notes_recipients_updated_at" ON "{SCHEMA_NAME}"."notes_recipients"("updated_at");
 CREATE INDEX "idx_{SCHEMA_NAME}_notes_openings_updated_at" ON "{SCHEMA_NAME}"."notes_openings"("updated_at");
 CREATE INDEX "idx_{SCHEMA_NAME}_memo_recipients_updated_at" ON "{SCHEMA_NAME}"."memo_recipients"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_registry_families_updated_at" ON "{SCHEMA_NAME}"."registry_families"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_registry_family_permissions_updated_at" ON "{SCHEMA_NAME}"."registry_family_permissions"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_records_updated_at" ON "{SCHEMA_NAME}"."records"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_record_history_updated_at" ON "{SCHEMA_NAME}"."record_history"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_record_relations_updated_at" ON "{SCHEMA_NAME}"."record_relations"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_record_case_links_updated_at" ON "{SCHEMA_NAME}"."record_case_links"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_record_document_links_updated_at" ON "{SCHEMA_NAME}"."record_document_links"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_case_responsibles_updated_at" ON "{SCHEMA_NAME}"."case_responsibles"("updated_at");
+CREATE INDEX "idx_{SCHEMA_NAME}_case_favorites_updated_at" ON "{SCHEMA_NAME}"."case_favorites"("updated_at");
 
 -- ============================================================================
 -- TRIGGERS: updated_at (todas las tablas)
@@ -1065,6 +1197,15 @@ DROP TRIGGER IF EXISTS trg_record_document_links_updated_at ON "{SCHEMA_NAME}"."
 CREATE TRIGGER trg_record_document_links_updated_at BEFORE UPDATE ON "{SCHEMA_NAME}"."record_document_links"
     FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
 
+-- Grupo J: Responsables y Favoritos
+DROP TRIGGER IF EXISTS trg_case_responsibles_updated_at ON "{SCHEMA_NAME}"."case_responsibles";
+CREATE TRIGGER trg_case_responsibles_updated_at BEFORE UPDATE ON "{SCHEMA_NAME}"."case_responsibles"
+    FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_case_favorites_updated_at ON "{SCHEMA_NAME}"."case_favorites";
+CREATE TRIGGER trg_case_favorites_updated_at BEFORE UPDATE ON "{SCHEMA_NAME}"."case_favorites"
+    FOR EACH ROW EXECUTE FUNCTION public.fn_set_updated_at();
+
 -- ============================================================================
 -- TRIGGER: Sincronizar users con public.user_registry
 -- ============================================================================
@@ -1112,6 +1253,22 @@ CREATE TRIGGER "trg_sync_user_registry"
 -- ============================================================================
 -- SECCION 2: SCHEMA AUDIT
 -- ============================================================================
+
+-- !! GUARD: idem SECCION 1 pero para el schema _audit correspondiente !!
+DO $$
+BEGIN
+    IF '{SCHEMA_NAME}_audit' = ANY(ARRAY[
+        'public', 'information_schema', 'pg_catalog', 'pg_toast',
+        -- Agrega aqui los schemas _audit de produccion que quieras proteger:
+        '100_example_audit', '101_example_audit'
+    ]) THEN
+        RAISE EXCEPTION
+            'ABORTADO: el schema "%" esta en la lista de schemas protegidos. '
+            'Edita manualmente la lista en 03-create-municipio.sql si es intencional.',
+            '{SCHEMA_NAME}_audit';
+    END IF;
+END;
+$$;
 
 DROP SCHEMA IF EXISTS "{SCHEMA_NAME}_audit" CASCADE;
 
@@ -1227,6 +1384,12 @@ $$ LANGUAGE plpgsql;
 --              case_official_documents (vinculacion de docs)
 -- Trazabilidad: user_id + auth_source inyectados via GUC por el Backend
 
+-- Users
+DROP TRIGGER IF EXISTS "trg_audit_users" ON "{SCHEMA_NAME}"."users";
+CREATE TRIGGER "trg_audit_users"
+    AFTER INSERT OR UPDATE OR DELETE ON "{SCHEMA_NAME}"."users"
+    FOR EACH ROW EXECUTE FUNCTION "{SCHEMA_NAME}_audit"."fn_log_change"();
+
 -- Departments
 DROP TRIGGER IF EXISTS "trg_audit_departments" ON "{SCHEMA_NAME}"."departments";
 CREATE TRIGGER "trg_audit_departments"
@@ -1301,13 +1464,13 @@ INSERT INTO "{SCHEMA_NAME}"."estado_users" ("id", "estado") VALUES
 
 -- Insertar IFRLM en document_types del tenant nuevo
 INSERT INTO "{SCHEMA_NAME}"."document_types"
-    ("global_document_type_id", "name", "acronym", "description", "required_signature", "is_active", "type", "trust")
+    ("global_document_type_id", "name", "acronym", "description", "signature_policy", "is_active", "type", "trust")
 SELECT
     'd0000000-0000-0000-0000-000000000080'::uuid,
     'Informe RLM',
     'IFRLM',
     'Informe de Registro Legajo Multiproposito (generado on-demand desde un legajo RLM)',
-    'required',
+    'electronic',
     true,
     'HTML',
     true
@@ -1400,8 +1563,8 @@ BEGIN
     RAISE NOTICE '============================================================';
     RAISE NOTICE '';
     RAISE NOTICE 'SCHEMA MUNICIPIO:';
-    RAISE NOTICE '  Tablas: 33 (Grupos A-I)';
-    RAISE NOTICE '  Indices: 47 (Performance + Vectorial)';
+    RAISE NOTICE '  Tablas: 35 (Grupos A-J: +case_responsibles +case_favorites)';
+    RAISE NOTICE '  Indices: 52 (Performance + Vectorial + Grupo J)';
     RAISE NOTICE '  Triggers: 34 (33 updated_at + 1 sync user_registry)';
     RAISE NOTICE '';
     RAISE NOTICE 'SCHEMA AUDIT:';

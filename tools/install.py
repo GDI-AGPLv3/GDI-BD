@@ -79,6 +79,17 @@ def main():
         print(f"  [ERROR] No se pudo conectar: {e}")
         return 1
 
+    # Guard: verificar que no estamos conectados a una BD de produccion.
+    # Los hostnames de PRD en Fly.io contienen 'prd' o 'demo'.
+    # El tunnel local de DEV siempre pasa por localhost:5433.
+    prd_indicators = ['prd', 'aries-postgres', 'arg-postgres', 'demo-postgres']
+    db_url_lower = DATABASE_URL.lower()
+    if any(ind in db_url_lower for ind in prd_indicators):
+        print("\n  [ERROR] La DATABASE_URL parece apuntar a una BD de PRODUCCION.")
+        print("  install.py es EXCLUSIVO para DEV (100_test). Abortar.")
+        conn.close()
+        return 1
+
     # Paso 1: DROP schemas existentes
     print(f"\n{'='*70}")
     print(f"  PASO 1: Limpiar schemas existentes")

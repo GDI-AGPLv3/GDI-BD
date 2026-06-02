@@ -11,7 +11,7 @@
 --
 -- CONTENIDO:
 --   Seccion 1: Schema 100_test (33 tablas + indices + trigger sync)
---   Seccion 2: Schema 100_test_audit (audit_log + fn_log_change + 6 triggers)
+--   Seccion 2: Schema 100_test_audit (audit_log + fn_log_change + 7 triggers)
 --   Seccion 3: Datos iniciales (settings + estado_users + municipio)
 --   Seccion 4: Datos demo (depts, sectors, ranks, users, doc types, etc.)
 --   Seccion 5: Drafts de bienvenida (5 documentos borrador)
@@ -21,7 +21,10 @@
 -- SECCION 1: SCHEMA 100_test (33 tablas + indices + trigger sync)
 -- ============================================================================
 
--- Limpiar schema si existe (para re-deploy)
+-- !! ADVERTENCIA: Las dos lineas siguientes destruyen TODOS los datos de 100_test !!
+-- Este archivo es EXCLUSIVO para el schema de DEV/TEST "100_test".
+-- NUNCA ejecutar contra una BD de PRD (DEMO/ARG/ARIES).
+-- Solo ejecutar cuando se quiere un redeploy limpio del entorno de desarrollo.
 DROP SCHEMA IF EXISTS "100_test" CASCADE;
 
 -- Crear schema
@@ -192,7 +195,7 @@ CREATE TABLE "100_test"."document_types" (
   "name" VARCHAR(100) NOT NULL,
   "acronym" VARCHAR(6) NOT NULL,
   "description" TEXT,
-  "required_signature" VARCHAR(50),
+  "signature_policy" TEXT NOT NULL DEFAULT 'electronic',
   "is_active" BOOLEAN NOT NULL DEFAULT true,
   "type" "public"."document_type_source" NOT NULL DEFAULT 'HTML',
   "trust" BOOLEAN NOT NULL DEFAULT true,
@@ -200,6 +203,7 @@ CREATE TABLE "100_test"."document_types" (
   "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT "document_types_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "document_types_acronym_unique" UNIQUE ("acronym"),
+  CONSTRAINT "document_types_signature_policy_chk" CHECK (signature_policy IN ('electronic','digital_all','digital_num')),
   CONSTRAINT "document_types_global_fkey" FOREIGN KEY ("global_document_type_id") REFERENCES "public"."global_document_types" ("id")
 );
 
@@ -429,6 +433,45 @@ CREATE TABLE "100_test"."case_proposed_documents" (
 );
 
 -- ============================================================================
+-- GRUPO J: RESPONSABLES Y FAVORITOS DE EXPEDIENTE
+-- ============================================================================
+
+-- TABLA 34: case_responsibles (responsables asignados a expedientes)
+CREATE TABLE "100_test"."case_responsibles" (
+  "id"         UUID        NOT NULL DEFAULT gen_random_uuid(),
+  "case_id"    UUID        NOT NULL,
+  "user_id"    UUID        NOT NULL,
+  "sector_id"  UUID        NOT NULL,
+  "type"       VARCHAR(20) NOT NULL CHECK ("type" IN ('ADMIN', 'ADDITIONAL')),
+  "added_by"   UUID        NOT NULL,
+  "added_at"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "removed_by" UUID,
+  "removed_at" TIMESTAMPTZ,
+  "is_active"  BOOLEAN     NOT NULL DEFAULT true,
+  CONSTRAINT "cr_pkey"          PRIMARY KEY ("id"),
+  CONSTRAINT "cr_case_fkey"     FOREIGN KEY ("case_id")   REFERENCES "100_test"."cases" ("id"),
+  CONSTRAINT "cr_user_fkey"     FOREIGN KEY ("user_id")   REFERENCES "100_test"."users" ("id"),
+  CONSTRAINT "cr_sector_fkey"   FOREIGN KEY ("sector_id") REFERENCES "100_test"."sectors" ("id"),
+  CONSTRAINT "cr_added_by_fkey" FOREIGN KEY ("added_by")  REFERENCES "100_test"."users" ("id")
+);
+
+COMMENT ON TABLE "100_test"."case_responsibles" IS 'Responsables asignados a expedientes (ADMIN único activo + ADDITIONAL ilimitados)';
+
+-- TABLA 35: case_favorites (expedientes marcados como favoritos por usuario)
+CREATE TABLE "100_test"."case_favorites" (
+  "id"         UUID        NOT NULL DEFAULT gen_random_uuid(),
+  "user_id"    UUID        NOT NULL,
+  "case_id"    UUID        NOT NULL,
+  "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT "cf_pkey"      PRIMARY KEY ("id"),
+  CONSTRAINT "cf_user_fkey" FOREIGN KEY ("user_id") REFERENCES "100_test"."users" ("id") ON DELETE CASCADE,
+  CONSTRAINT "cf_case_fkey" FOREIGN KEY ("case_id") REFERENCES "100_test"."cases" ("id") ON DELETE CASCADE,
+  CONSTRAINT "cf_unique"    UNIQUE ("user_id", "case_id")
+);
+
+COMMENT ON TABLE "100_test"."case_favorites" IS 'Expedientes marcados como favoritos por cada usuario';
+
+-- ============================================================================
 -- GRUPO F: CONFIGURACION
 -- ============================================================================
 
@@ -465,8 +508,12 @@ CREATE TABLE "100_test"."document_chunks" (
   "official_document_id" UUID NOT NULL,
   "chunk_index" INTEGER NOT NULL,
   "chunk_text" TEXT NOT NULL,
+  "text_for_embedding" TEXT,
   "embedding" vector(1536),
   "embedding_model" VARCHAR(100) NOT NULL DEFAULT 'text-embedding-3-small',
+  "content_tsv" tsvector GENERATED ALWAYS AS (
+    to_tsvector('spanish', coalesce(text_for_embedding, chunk_text, ''))
+  ) STORED,
   "indexed_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT "document_chunks_pkey" PRIMARY KEY ("id"),
   CONSTRAINT "document_chunks_official_fkey" FOREIGN KEY ("official_document_id") REFERENCES "100_test"."official_documents" ("id"),
@@ -562,7 +609,7 @@ COMMENT ON TABLE "100_test"."registry_family_permissions" IS 'Permisos de sector
 CREATE TABLE "100_test"."records" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "record_number" VARCHAR(50) NOT NULL,
-  "display_name" VARCHAR(200) NOT NULL,
+  "display_name" VARCHAR(200),
   "registry_family_id" UUID NOT NULL,
   "data" JSONB DEFAULT '{}',
   "state" VARCHAR(50) DEFAULT 'Activo',
@@ -606,7 +653,7 @@ CREATE TABLE "100_test"."record_relations" (
   "id" UUID NOT NULL DEFAULT gen_random_uuid(),
   "source_record_id" UUID NOT NULL,
   "target_record_id" UUID NOT NULL,
-  "relation_type" "public"."relation_type" NOT NULL DEFAULT 'related',
+  "relation_type" VARCHAR(50) DEFAULT 'related',
   "notes" TEXT,
   "created_by_user_id" UUID NOT NULL,
   "created_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -724,12 +771,31 @@ CREATE INDEX "idx_100_test_doc_signers_doc_user" ON "100_test"."document_signers
 -- case_proposed_documents: propuestas de vinculación
 CREATE INDEX "idx_100_test_case_prop_docs_case" ON "100_test"."case_proposed_documents" ("case_id");
 
+-- Grupo J: Responsables y Favoritos de Expediente
+CREATE UNIQUE INDEX "idx_100_test_cr_unique_admin"
+  ON "100_test"."case_responsibles" ("case_id")
+  WHERE "type" = 'ADMIN' AND "is_active" = true;
+CREATE INDEX "idx_100_test_cr_case_active"
+  ON "100_test"."case_responsibles" ("case_id", "is_active");
+CREATE INDEX "idx_100_test_cr_user"
+  ON "100_test"."case_responsibles" ("user_id")
+  WHERE "is_active" = true;
+CREATE INDEX "idx_100_test_cr_sector"
+  ON "100_test"."case_responsibles" ("sector_id")
+  WHERE "is_active" = true;
+CREATE INDEX "idx_100_test_case_favorites_user"
+  ON "100_test"."case_favorites" ("user_id", "created_at" DESC);
+
 -- Grupo G: Agente IA (solo document_chunks)
 CREATE INDEX "idx_100_test_chunks_doc" ON "100_test"."document_chunks" ("official_document_id");
 
 -- Indice vectorial HNSW para búsqueda semántica
 CREATE INDEX "idx_100_test_chunks_embedding" ON "100_test"."document_chunks"
     USING hnsw ("embedding" vector_cosine_ops);
+
+-- Indice GIN para BM25 (Hybrid Search)
+CREATE INDEX "idx_100_test_chunks_content_tsv" ON "100_test"."document_chunks"
+    USING GIN ("content_tsv");
 
 -- Grupo H: Notas
 CREATE INDEX "idx_100_test_notes_recipients_document" ON "100_test"."notes_recipients" ("document_id");
@@ -835,7 +901,8 @@ CREATE TRIGGER "trg_document_number_counters_updated_at"
 -- SECCION 2: SCHEMA 100_test_audit (audit_log + fn_log_change + 6 triggers)
 -- ============================================================================
 
--- Limpiar schema si existe (para re-deploy)
+-- !! ADVERTENCIA: La siguiente linea destruye todos los registros de auditoria de 100_test !!
+-- Solo ejecutar en contexto de redeploy de DEV/TEST. Nunca en PRD.
 DROP SCHEMA IF EXISTS "100_test_audit" CASCADE;
 
 -- Crear schema de audit
@@ -987,6 +1054,11 @@ CREATE TRIGGER "trg_audit_case_official_documents"
     AFTER INSERT OR UPDATE OR DELETE ON "100_test"."case_official_documents"
     FOR EACH ROW EXECUTE FUNCTION "100_test_audit"."fn_log_change"();
 
+DROP TRIGGER IF EXISTS "trg_audit_users" ON "100_test"."users";
+CREATE TRIGGER "trg_audit_users"
+    AFTER INSERT OR UPDATE OR DELETE ON "100_test"."users"
+    FOR EACH ROW EXECUTE FUNCTION "100_test_audit"."fn_log_change"();
+
 -- ============================================================================
 -- SECCION 3: DATOS INICIALES (settings + estado_users + municipio)
 -- ============================================================================
@@ -1032,12 +1104,12 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- API key para GDI-AgenteLANG (AI Worker)
--- Key deterministica: gdi-agent-100_test-ea3167d2733fe8066482552b6979a0dd
--- Generada por: hashlib.md5(("100_test" + "gdi-agentelang-2026").encode()).hexdigest()
+-- Key deterministica: gdi-agent-<schema>-<YOUR_KEY_HEX>
+-- Generada por: hashlib.md5(("100_test" + "<YOUR_AGENT_SECRET>").encode()).hexdigest()
 INSERT INTO "public"."api_keys" (id, api_key_hash, api_key_prefix, municipality_id, name, description, is_active, created_by)
 VALUES (
   'c1000000-0000-0000-0000-000000000001',
-  '8d195caa5018e162e2fc91215ebdee7c741c2fd21da63e33ccc71c22371afbff',
+  '<YOUR_API_KEY_HASH_SHA256>',
   'gdi-agent-10',
   'b5500000-0000-0000-0000-000000000100',
   'GDI-AgenteLANG',
@@ -1232,38 +1304,38 @@ ON CONFLICT ON CONSTRAINT "user_roles_unique" DO NOTHING;
 -- global_document_type_id referencia IDs de 02-seed-global.sql
 
 INSERT INTO "100_test"."document_types"
-  (id, global_document_type_id, name, acronym, description, required_signature, is_active, type, created_at)
+  (id, global_document_type_id, name, acronym, description, signature_policy, is_active, type, created_at)
 VALUES
   -- Tipos basicos de uso frecuente
-  (1, 'd0000000-0000-0000-0000-000000000001', 'Informe', 'IF', 'Informe tecnico o administrativo', 'required', true, 'HTML', NOW()),
-  (2, 'd0000000-0000-0000-0000-000000000002', 'Nota', 'NOTA', 'Nota oficial con destinatarios TO/CC/BCC y tracking de apertura', 'required', true, 'NOTA', NOW()),
-  (3, 'd0000000-0000-0000-0000-000000000003', 'Providencia', 'PROV', 'Providencia administrativa', 'required', true, 'HTML', NOW()),
-  (4, 'd0000000-0000-0000-0000-000000000004', 'Acta', 'ACT', 'Acta de reunion, evento, accion, etc.', 'required', true, 'HTML', NOW()),
-  (5, 'd0000000-0000-0000-0000-000000000005', 'Anexo', 'ANEXO', 'Anexo documental', 'required', true, 'HTML', NOW()),
-  (6, 'd0000000-0000-0000-0000-000000000008', 'Informe Grafico Importado', 'IFGRA', 'Informe grafico importado desde archivo externo', 'required', true, 'Importado', NOW()),
-  (7, 'd0000000-0000-0000-0000-000000000009', 'Constancia', 'CONST', 'Constancia administrativa', 'required', true, 'HTML', NOW()),
-  (8, 'd0000000-0000-0000-0000-000000000010', 'Resolucion', 'RESOL', 'Resolucion administrativa', 'required', true, 'HTML', NOW()),
-  (9, 'd0000000-0000-0000-0000-000000000013', 'Dictamen', 'DICTA', 'Dictamen legal o tecnico', 'required', true, 'HTML', NOW()),
-  (10, 'd0000000-0000-0000-0000-000000000015', 'Oficio Judicial', 'OFJUD', 'Oficio judicial', 'required', true, 'Importado', NOW()),
+  (1, 'd0000000-0000-0000-0000-000000000001', 'Informe', 'IF', 'Informe tecnico o administrativo', 'electronic', true, 'HTML', NOW()),
+  (2, 'd0000000-0000-0000-0000-000000000002', 'Nota', 'NOTA', 'Nota oficial con destinatarios TO/CC/BCC y tracking de apertura', 'electronic', true, 'NOTA', NOW()),
+  (3, 'd0000000-0000-0000-0000-000000000003', 'Providencia', 'PROV', 'Providencia administrativa', 'electronic', true, 'HTML', NOW()),
+  (4, 'd0000000-0000-0000-0000-000000000004', 'Acta', 'ACT', 'Acta de reunion, evento, accion, etc.', 'electronic', true, 'HTML', NOW()),
+  (5, 'd0000000-0000-0000-0000-000000000005', 'Anexo', 'ANEXO', 'Anexo documental', 'electronic', true, 'HTML', NOW()),
+  (6, 'd0000000-0000-0000-0000-000000000008', 'Informe Grafico Importado', 'IFGRA', 'Informe grafico importado desde archivo externo', 'electronic', true, 'Importado', NOW()),
+  (7, 'd0000000-0000-0000-0000-000000000009', 'Constancia', 'CONST', 'Constancia administrativa', 'electronic', true, 'HTML', NOW()),
+  (8, 'd0000000-0000-0000-0000-000000000010', 'Resolucion', 'RESOL', 'Resolucion administrativa', 'electronic', true, 'HTML', NOW()),
+  (9, 'd0000000-0000-0000-0000-000000000013', 'Dictamen', 'DICTA', 'Dictamen legal o tecnico', 'electronic', true, 'HTML', NOW()),
+  (10, 'd0000000-0000-0000-0000-000000000015', 'Oficio Judicial', 'OFJUD', 'Oficio judicial', 'electronic', true, 'Importado', NOW()),
   -- Tipos especificos de tramites
-  (11, 'd0000000-0000-0000-0000-00000000001f', 'Acta de Inspeccion', 'AINSP', 'Acta de inspeccion', 'required', true, 'HTML', NOW()),
-  (12, 'd0000000-0000-0000-0000-000000000020', 'Permiso General', 'PERMI', 'Permiso general', 'required', true, 'HTML', NOW()),
-  (13, 'd0000000-0000-0000-0000-000000000022', 'Cert. Inspeccion Final', 'CIF', 'Certificado de inspeccion final', 'required', true, 'HTML', NOW()),
-  (14, 'd0000000-0000-0000-0000-000000000023', 'Cert. Habilit. Comercio', 'HCOM', 'Certificado de habilitacion de comercio', 'required', true, 'HTML', NOW()),
-  (15, 'd0000000-0000-0000-0000-000000000024', 'Certificado Parcelario', 'CPARC', 'Certificado parcelario', 'required', true, 'Importado', NOW()),
-  (16, 'd0000000-0000-0000-0000-000000000037', 'Constancia de Pago', 'PAGO', 'Constancia de pago', 'required', true, 'HTML', NOW()),
-  (17, 'd0000000-0000-0000-0000-000000000039', 'Pre-Pliego', 'PREPL', 'Pre-pliego para compras y contrataciones', 'required', true, 'HTML', NOW()),
-  (18, 'd0000000-0000-0000-0000-00000000003a', 'Pliego Definitivo', 'PLIEG', 'Pliego definitivo para licitaciones', 'required', true, 'HTML', NOW()),
+  (11, 'd0000000-0000-0000-0000-00000000001f', 'Acta de Inspeccion', 'AINSP', 'Acta de inspeccion', 'electronic', true, 'HTML', NOW()),
+  (12, 'd0000000-0000-0000-0000-000000000020', 'Permiso General', 'PERMI', 'Permiso general', 'electronic', true, 'HTML', NOW()),
+  (13, 'd0000000-0000-0000-0000-000000000022', 'Cert. Inspeccion Final', 'CIF', 'Certificado de inspeccion final', 'electronic', true, 'HTML', NOW()),
+  (14, 'd0000000-0000-0000-0000-000000000023', 'Cert. Habilit. Comercio', 'HCOM', 'Certificado de habilitacion de comercio', 'electronic', true, 'HTML', NOW()),
+  (15, 'd0000000-0000-0000-0000-000000000024', 'Certificado Parcelario', 'CPARC', 'Certificado parcelario', 'electronic', true, 'Importado', NOW()),
+  (16, 'd0000000-0000-0000-0000-000000000037', 'Constancia de Pago', 'PAGO', 'Constancia de pago', 'electronic', true, 'HTML', NOW()),
+  (17, 'd0000000-0000-0000-0000-000000000039', 'Pre-Pliego', 'PREPL', 'Pre-pliego para compras y contrataciones', 'electronic', true, 'HTML', NOW()),
+  (18, 'd0000000-0000-0000-0000-00000000003a', 'Pliego Definitivo', 'PLIEG', 'Pliego definitivo para licitaciones', 'electronic', true, 'HTML', NOW()),
   -- Tipos HCD (Honorable Concejo Deliberante)
-  (19, 'd0000000-0000-0000-0000-00000000003e', 'Ordenanza HCD', 'PLORD', 'Ordenanza sancionada por el Honorable Concejo Deliberante', 'required', true, 'Importado', NOW()),
-  (20, 'd0000000-0000-0000-0000-00000000003f', 'Resolucion HCD', 'PLRES', 'Resolucion emitida por el Honorable Concejo Deliberante', 'required', true, 'Importado', NOW()),
-  (21, 'd0000000-0000-0000-0000-000000000040', 'Comunicacion HCD', 'PLCOM', 'Comunicacion oficial del Honorable Concejo Deliberante', 'required', true, 'Importado', NOW()),
+  (19, 'd0000000-0000-0000-0000-00000000003e', 'Ordenanza HCD', 'PLORD', 'Ordenanza sancionada por el Honorable Concejo Deliberante', 'electronic', true, 'Importado', NOW()),
+  (20, 'd0000000-0000-0000-0000-00000000003f', 'Resolucion HCD', 'PLRES', 'Resolucion emitida por el Honorable Concejo Deliberante', 'electronic', true, 'Importado', NOW()),
+  (21, 'd0000000-0000-0000-0000-000000000040', 'Comunicacion HCD', 'PLCOM', 'Comunicacion oficial del Honorable Concejo Deliberante', 'electronic', true, 'Importado', NOW()),
   -- Legajo
-  (22, 'd0000000-0000-0000-0000-000000000080', 'Informe RLM', 'IFRLM', 'Informe de Registro Legajo Multiproposito (generado on-demand desde un legajo RLM)', 'required', true, 'HTML', NOW()),
+  (22, 'd0000000-0000-0000-0000-000000000080', 'Informe RLM', 'IFRLM', 'Informe de Registro Legajo Multiproposito (generado on-demand desde un legajo RLM)', 'electronic', true, 'HTML', NOW()),
   -- Tipos internos del sistema (no visibles para usuarios)
-  (23, 'd0000000-0000-0000-0000-00000000003c', 'Pase', 'PV', 'Pase de expediente (Uso exclusivo modulo EE)', 'required', false, 'HTML', NOW()),
-  (24, 'd0000000-0000-0000-0000-00000000003d', 'Caratula', 'CAEX', 'Caratula de expediente (Uso exclusivo modulo EE)', 'required', false, 'HTML', NOW()),
-  (25, 'd0000000-0000-0000-0000-000000000042', 'Testing', 'TST', 'Documento generado automaticamente cuando una firma falla (Uso exclusivo del sistema)', 'required', false, 'HTML', NOW())
+  (23, 'd0000000-0000-0000-0000-00000000003c', 'Pase', 'PV', 'Pase de expediente (Uso exclusivo modulo EE)', 'electronic', false, 'HTML', NOW()),
+  (24, 'd0000000-0000-0000-0000-00000000003d', 'Caratula', 'CAEX', 'Caratula de expediente (Uso exclusivo modulo EE)', 'electronic', false, 'HTML', NOW()),
+  (25, 'd0000000-0000-0000-0000-000000000042', 'Testing', 'TST', 'Documento generado automaticamente cuando una firma falla (Uso exclusivo del sistema)', 'electronic', false, 'HTML', NOW())
 ON CONFLICT (id) DO NOTHING;
 
 -- Reset sequence
@@ -1405,8 +1477,8 @@ BEGIN
     RAISE NOTICE '============================================================';
     RAISE NOTICE '';
     RAISE NOTICE 'SCHEMA 100_test:';
-    RAISE NOTICE '  33 tablas creadas (Grupos A-I)';
-    RAISE NOTICE '  Todos los indices creados';
+    RAISE NOTICE '  35 tablas creadas (Grupos A-J: +case_responsibles +case_favorites)';
+    RAISE NOTICE '  Todos los indices creados (incluye Grupo J: 5 indices nuevos)';
     RAISE NOTICE '  Trigger de sync con user_registry activado';
     RAISE NOTICE '';
     RAISE NOTICE 'SCHEMA 100_test_audit:';

@@ -1,7 +1,7 @@
 # SQL-INDEX.md - Indice y Auditoria de Scripts SQL
 
 Generado: 2026-02-26
-Base de datos auditada: instancia Fly.io de referencia via localhost:5433, db `railway`
+Base de datos auditada: <your-postgres-app> (Fly.io) via localhost:5433, db `railway`
 
 ---
 
@@ -38,6 +38,24 @@ Los archivos `01-install.sql`, `02-seed-global.sql`, `02b-seed-agente.sql` y `04
 
 | # | Archivo | Que hace | Estado |
 |---|---------|----------|--------|
+| 0 | `044_document_chunks_hybrid.sql` | Multi-tenant: agrega `text_for_embedding TEXT` + `content_tsv tsvector GENERATED ALWAYS STORED` + índice GIN en `document_chunks` de todos los schemas con esa tabla. Habilita Hybrid Search (Vector + BM25) y headers contextuales. Proyecto MejorasLANG V1 Sprint 1. | **ACTIVO** - Aplicada en DEV (2026-04-29). DEMO/ARIES/ARG postpuestos. |
+| 1 | `043_rag_query_log.sql` | Crea `public.rag_query_log` para auditoría del endpoint semantic_search. 15 columnas (contexto, query, retrieval, performance). 3 índices: (schema_name, created_at DESC), GIN trigram sobre query, partial sobre final_returned=0. Proyecto MejorasLANG V1 Sprint 0. | **ACTIVO** - Aplicada en DEV (2026-04-29). PRD postpuesto. |
+
+> **Nota 2026-06-01**: las migraciones 058, 059 y 060 fueron archivadas en `sql/migrations/archive/` porque sus índices ya están horneados en los dos templates canónicos (ver sección 2.3 y 7 abajo).
+
+#### Índices de mig 059/060 — ahora en los templates
+
+Los 3 índices de performance de las migraciones 059 y 060 fueron incorporados directamente en:
+- `sql/03-create-municipio.sql` (fuente de verdad)
+- `GDI-BackOffice-Back/sql/03-create-web-schema.sql` (copia operativa)
+
+Nuevos municipios los heredan automáticamente sin necesidad de migración adicional.
+
+| Índice | Tabla | Tipo | Origen |
+|--------|-------|------|--------|
+| `idx_{SCHEMA_NAME}_document_draft_resume_null` | `document_draft` | Parcial `WHERE resume IS NULL` en `(id)` | mig 059 |
+| `idx_{SCHEMA_NAME}_official_documents_resume_null` | `official_documents` | Parcial `WHERE resume IS NULL` en `(id)` | mig 059 |
+| `idx_{SCHEMA_NAME}_departments_head_user_id` | `departments` | BTREE en `(head_user_id)` | mig 060 |
 | 1 | `014_add_notes_tables.sql` | Template generico: crea notes_recipients + notes_openings por schema | **OBSOLETO** - Integrado en 03 y 04 |
 | 2 | `014_add_cases_performance_indexes.sql` | 4 indices de performance para case_movements y case_official_documents | **OBSOLETO** - Integrado en 03 y 04 |
 | 3 | `014_apply_to_100_test.sql` | Aplica notas especificamente a 100_test | **OBSOLETO** - Integrado en 04 |
@@ -224,6 +242,11 @@ Para un deploy desde cero, las migraciones NO son necesarias. Solo sirven para:
 ### Gaps en numeracion (migraciones eliminadas previamente)
 - 001-013, 019-021: Eliminadas en limpiezas anteriores (documentado en CLAUDE.md)
 - Solo quedan 014-018, 022-027
+
+### Archivadas en sql/migrations/archive/ (2026-06-01)
+- `058_checkpoint_indexes.sql`: índices de schema public para LangGraph checkpointer. Ya aplicada en todos los deploys.
+- `059_agentelang_polling_index.sql`: índices parciales `document_draft_resume_null` y `official_documents_resume_null`. **Horneada en templates** (03-create-municipio.sql + 03-create-web-schema.sql).
+- `060_departments_head_user_index.sql`: índice `departments_head_user_id`. **Horneada en templates** (03-create-municipio.sql + 03-create-web-schema.sql).
 
 ---
 

@@ -10,6 +10,7 @@ Uso:
 """
 
 import psycopg2
+import psycopg2.extensions
 import sys
 import os
 import re
@@ -37,10 +38,54 @@ def read_script(script_path):
         return f.read()
 
 
-def replace_placeholders(sql, replacements):
-    """Reemplaza placeholders en el SQL usando un diccionario"""
-    for key, value in replacements.items():
+def escape_sql_literal(conn, value):
+    """
+    Escapa un valor de texto para uso seguro como literal SQL.
+    Usa psycopg2.extensions.adapt() que aplica el mismo mecanismo
+    que los queries parametrizados — previene SQL injection.
+    Solo para valores de DATOS (strings de usuario), NO para identificadores.
+    """
+    adapted = psycopg2.extensions.adapt(str(value))
+    adapted.prepare(conn)
+    # mogrify retorna bytes con las comillas incluidas, ej: b"'Buenos Aires'"
+    # removemos las comillas externas para que encajen en el placeholder '{VALUE}'
+    escaped = adapted.getquoted().decode('utf-8')
+    # escaped tiene la forma 'valor' (con comillas). Las removemos porque el
+    # placeholder en el SQL ya esta envuelto en comillas simples: '{CITY}'
+    # Entonces reemplazamos '{CITY}' por el valor escapado sin comillas extra.
+    # Ejemplo: '{CITY}' con value="O'Higgins" -> 'O''Higgins' (escape correcto).
+    # Para lograr eso retornamos el string CON sus comillas y el caller
+    # reemplaza '{PLACEHOLDER}' (con comillas) por el escaped completo.
+    return escaped
+
+
+def replace_placeholders(conn, sql, replacements_safe, replacements_data):
+    """
+    Reemplaza placeholders en el SQL en dos pasos:
+
+    1. replacements_safe: identificadores y constantes validadas por regex
+       (schema_name, acronym, country, schema_number, colores hex, bucket names).
+       Se reemplazan directamente porque ya fueron validados con regex estricto
+       y son identificadores PostgreSQL, no valores arbitrarios del usuario.
+
+    2. replacements_data: texto libre ingresado por el usuario
+       (municipality_name, city). Se escapan via psycopg2.extensions.adapt()
+       antes de sustituir, eliminando el riesgo de SQL injection.
+       El placeholder en el SQL tiene la forma '{KEY}' (con comillas simples
+       alrededor en el SQL). El escaped ya incluye sus propias comillas, por
+       lo que reemplazamos la forma completa '{KEY}' -> escaped.
+    """
+    # Paso 1: identificadores y constantes validadas
+    for key, value in replacements_safe.items():
         sql = sql.replace(key, str(value))
+
+    # Paso 2: valores de texto libre — escapados via psycopg2
+    for key, value in replacements_data.items():
+        escaped = escape_sql_literal(conn, value)
+        # En el SQL el placeholder aparece dentro de comillas simples: '{KEY}'
+        # Lo reemplazamos por el valor escapado (que ya trae sus comillas).
+        sql = sql.replace(f"'{key}'", escaped)
+
     return sql
 
 
@@ -167,7 +212,7 @@ def main():
     # --- Paso 1: Datos del municipio ---
     print("  --- Datos del municipio ---\n")
 
-    municipality_name = ask_input("Nombre del municipio (ej: Municipalidad de La Plata)")
+    municipality_name = ask_input("Nombre del municipio (ej: Municipalidad del Futuro)")
 
     acronym = ask_input(
         "Acronimo (4 chars max, ej: LPLA)",
@@ -210,6 +255,19 @@ def main():
     schema_name = f"{schema_number}_{acr_lower}"
     audit_schema_name = f"{schema_name}_audit"
 
+    # Guard de schemas protegidos (primera linea de defensa en Python).
+    # El SQL tiene su propio DO-block como segunda linea. Ambos deben coincidir.
+    PROTECTED_SCHEMAS = {
+        'public', 'information_schema', 'pg_catalog', 'pg_toast',
+        # Schemas de PRD conocidos (actualizar si se agregan municipios nuevos)
+        '100_example', '101_example',
+    }
+    if schema_name in PROTECTED_SCHEMAS or audit_schema_name in PROTECTED_SCHEMAS:
+        print(f"\n  [ERROR] El schema '{schema_name}' esta en la lista de schemas protegidos.")
+        print(f"  Abortando para evitar DROP accidental de un municipio productivo.")
+        conn.close()
+        return 1
+
     # --- Paso 4: Resumen ---
     print(f"\n{'='*70}")
     print("  RESUMEN - Nuevo Municipio")
@@ -237,17 +295,26 @@ def main():
     print("  EJECUTANDO 03-create-municipio.sql")
     print(f"{'='*70}")
 
-    # Placeholders
-    replacements = {
+    # Placeholders de identificadores y constantes validadas por regex.
+    # Estos son seguros porque fueron validados con patrones estrictos arriba
+    # (acronym: ^[A-Za-z]{2,4}$, country: ^[A-Z]{2}$, primary_color: ^[0-9A-Fa-f]{6}$,
+    # schema_name/number: derivados de los anteriores, buckets: derivados del acronym).
+    replacements_safe = {
         "{SCHEMA_NAME}": schema_name,
         "{BUCKET_OFICIAL}": bucket_oficial,
         "{BUCKET_TOSIGN}": bucket_tosign,
-        "{CITY}": city,
         "{PRIMARY_COLOR}": primary_color,
-        "{MUNICIPALITY_NAME}": municipality_name,
         "{ACRONYM}": acronym,
         "{COUNTRY}": country,
         "{SCHEMA_NUMBER}": str(schema_number),
+    }
+
+    # Placeholders de texto libre ingresado por el usuario.
+    # Estos se escapan via psycopg2.extensions.adapt() (mismo mecanismo que
+    # queries parametrizados) para prevenir SQL injection.
+    replacements_data = {
+        "{MUNICIPALITY_NAME}": municipality_name,
+        "{CITY}": city,
     }
 
     script_path = SQL_DIR / "03-create-municipio.sql"
@@ -257,7 +324,7 @@ def main():
         return 1
 
     sql = read_script(script_path)
-    sql = replace_placeholders(sql, replacements)
+    sql = replace_placeholders(conn, sql, replacements_safe, replacements_data)
 
     success = execute_script(conn, "03-create-municipio.sql", sql)
 

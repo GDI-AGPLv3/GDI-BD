@@ -1,20 +1,27 @@
 -- ============================================================================
--- GDI - CREAR USUARIO "Testing Automatizado" + API Key
+-- GDI LATAM - CREAR USUARIO "Testing Automatizado" + API Key
 -- ============================================================================
--- Descripcion: Crea un usuario de testing con API Key para pruebas automaticas.
+-- Descripcion: Crea usuario de testing con API key para pruebas automaticas
 -- Version: 1.2.0
 --
--- USO: Ejecutar en cada ambiente despues de provisionar el schema del municipio
---      (ver 03-create-municipio.sql).
+-- USO: Ejecutar en CADA ambiente (DEV, ARIES, ARG)
+--      Requiere que el schema del municipio ya exista con datos seed
+--      Cambiar las 5 variables del bloque DO segun ambiente
 --
--- IMPORTANTE: Antes de ejecutar, generar una API Key nueva con:
---      python -c "import secrets; print(secrets.token_hex(16))"
--- y reemplazar en el bloque DECLARE el v_api_key_plain y v_api_key_hash
--- (sha256 hex del plain).
+-- API KEYS POR AMBIENTE (generadas con secrets.token_hex(16)):
+--   DEV:   <YOUR_API_KEY_PLAIN_HEX>
+--   ARIES: <YOUR_API_KEY_PLAIN_HEX>
+--   ARG:   <YOUR_API_KEY_PLAIN_HEX>
 --
--- IDs fijos sugeridos (mismos en TODOS los ambientes para simplicidad):
+-- IDs fijos (mismos en TODOS los ambientes):
 --   User ID:    a1000000-0000-0000-0000-0000000000ff
 --   API Key ID: c1000000-0000-0000-0000-0000000000ff
+--   Sector:     Innovacion PRIV (51000000-0000-0000-0000-000000000003)
+--   Rol:        Usuario General (a0000000-0000-0000-0000-000000000001)
+--   Sello:      Innovador (city_seal 1)
+--
+-- EJECUTADO:
+--   DEV (2026-03-04): OK - curl 200 verificado
 -- ============================================================================
 
 DO $$
@@ -23,8 +30,8 @@ DECLARE
     v_schema_name     TEXT := '100_test';
     v_municipality_id UUID := 'b5500000-0000-0000-0000-000000000100';
     v_api_key_plain   TEXT := '<YOUR_API_KEY_PLAIN_HEX>';
-    v_api_key_hash    TEXT := '<YOUR_API_KEY_SHA256_HEX>';
-    v_api_key_prefix  TEXT := '<YOUR_API_KEY_PREFIX>';
+    v_api_key_hash    TEXT := '<YOUR_API_KEY_HASH_SHA256>';
+    v_api_key_prefix  TEXT := 'gdi-test-dev';
 
     -- IDs fijos (NO cambiar)
     v_user_id         UUID := 'a1000000-0000-0000-0000-0000000000ff';
@@ -101,10 +108,10 @@ BEGIN
         v_api_key_prefix,
         v_municipality_id,
         'Testing Automatizado',
-        'API Key para tests automaticos',
+        'API Key para tests automaticos (/test-dev, /test-aries, /test-arg)',
         true,
         200,
-        'setup-script',
+        'claude-code',
         NOW()
     )
     ON CONFLICT (id) DO UPDATE SET
@@ -146,3 +153,37 @@ BEGIN
     RAISE NOTICE '    -H "X-User-ID: %"', v_user_id;
     RAISE NOTICE '============================================================';
 END $$;
+
+-- ============================================================================
+-- VERIFICACION
+-- ============================================================================
+-- SELECT id, full_name, email, sector_id FROM "{SCHEMA}".users WHERE id = 'a1000000-0000-0000-0000-0000000000ff';
+-- SELECT id, api_key_prefix, name, is_active FROM public.api_keys WHERE id = 'c1000000-0000-0000-0000-0000000000ff';
+-- SELECT * FROM public.api_key_users WHERE api_key_id = 'c1000000-0000-0000-0000-0000000000ff';
+
+-- ============================================================================
+-- VALORES POR AMBIENTE (copiar al bloque DECLARE):
+-- ============================================================================
+--
+-- DEV (<your-postgres-app>, tunnel 5433):
+--   v_schema_name     := '100_test';
+--   v_municipality_id := 'b5500000-0000-0000-0000-000000000100';
+--   v_api_key_plain   := '<YOUR_API_KEY_PLAIN_HEX>';
+--   v_api_key_hash    := '<YOUR_API_KEY_HASH_SHA256>';
+--   v_api_key_prefix  := 'gdi-test-dev';
+--
+-- ARIES (<your-postgres-app>, tunnel 5434):
+--   v_schema_name     := '100_test';
+--   v_municipality_id := (SELECT id FROM public.municipalities WHERE schema_name = '100_test');
+--   v_api_key_plain   := '<YOUR_API_KEY_PLAIN_HEX>';
+--   v_api_key_hash    := '<YOUR_API_KEY_HASH_SHA256>';
+--   v_api_key_prefix  := 'gdi-test-ari';
+--
+-- ARG (<your-postgres-app>, tunnel 5435):
+--   v_schema_name     := '100_test';
+--   v_municipality_id := (SELECT id FROM public.municipalities WHERE schema_name = '100_test');
+--   v_api_key_plain   := '<YOUR_API_KEY_PLAIN_HEX>';
+--   v_api_key_hash    := '<YOUR_API_KEY_HASH_SHA256>';
+--   v_api_key_prefix  := 'gdi-test-arg';
+--
+-- ============================================================================

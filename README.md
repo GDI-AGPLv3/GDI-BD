@@ -216,12 +216,5 @@ DATABASE_URL=postgresql://user:pass@host:port/railway
 
 ---
 
-## Licencia
-
-Este proyecto está licenciado bajo la **GNU Affero General Public License v3.0 (AGPL-3.0)**.
-
-Ver el archivo [LICENSE](LICENSE) para los términos completos.
-
----
-
 **Version:** 7.0.0
+**Ultima actualizacion:** 2026-02-20

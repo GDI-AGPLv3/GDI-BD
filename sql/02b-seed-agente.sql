@@ -208,6 +208,50 @@ CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx
 
 
 -- ============================================================================
+-- rag_query_log (mig 043) - auditoría de queries semantic_search
+-- Tabla cross-tenant en public para capturar tráfico real de semantic_search.
+-- Habilita: métricas offline (eval set), análisis de queries vacías, latencia por tenant.
+-- Fuente: GDI-AgenteLANG endpoint semantic_search
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS public.rag_query_log (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  -- Contexto
+  schema_name TEXT NOT NULL,
+  user_id UUID,
+  source TEXT NOT NULL,                      -- 'api' | 'mcp' | 'eval'
+  intent TEXT,                                -- 'rag' | 'lookup' (Sprint 1)
+
+  -- Query
+  query TEXT NOT NULL,
+  rewritten_query TEXT,
+
+  -- Resultados de retrieval
+  candidates_returned INT,                    -- cuántos pasaron permisos
+  final_returned INT,                         -- cuántos devolvió
+  top_similarity NUMERIC(5,4),
+  bottom_similarity NUMERIC(5,4),
+  threshold_applied NUMERIC(3,2),
+  results_doc_ids UUID[],
+
+  -- Performance
+  latency_ms INT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rag_query_log_schema_created
+  ON public.rag_query_log(schema_name, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_rag_query_log_query_trgm
+  ON public.rag_query_log USING gin(query gin_trgm_ops);
+
+CREATE INDEX IF NOT EXISTS idx_rag_query_log_empty
+  ON public.rag_query_log(created_at DESC)
+  WHERE final_returned = 0;
+
+
+-- ============================================================================
 -- FIN
 -- ============================================================================
 DO $$
@@ -222,5 +266,6 @@ BEGIN
     RAISE NOTICE '  5. public.checkpoints';
     RAISE NOTICE '  6. public.checkpoint_blobs';
     RAISE NOTICE '  7. public.checkpoint_writes';
+    RAISE NOTICE '  8. public.rag_query_log (mig 043)';
     RAISE NOTICE '';
 END $$;
