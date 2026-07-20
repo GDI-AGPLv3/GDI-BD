@@ -118,8 +118,8 @@ GDI-BD/
 | {ACRONYM} | TXST | Acronimo 4 chars |
 | {COUNTRY} | AR | Codigo pais (enum) |
 | {SCHEMA_NUMBER} | 100 | Numero auto-incremental |
-| {BUCKET_OFICIAL} | gdi-txst-oficial | Bucket Cloudflare R2 |
-| {BUCKET_TOSIGN} | gdi-txst-tosign | Bucket Cloudflare R2 |
+| {BUCKET_OFICIAL} | gdi-txst-oficial | Bucket Cloudflare R2 (documentos oficiales) |
+| {BUCKET_TOSIGN} | gdi-txst-tosign | Bucket Cloudflare R2 (pendientes de firma + imagenes de edicion) |
 | {CITY} | LATAM | Ciudad para firma digital |
 | {PRIMARY_COLOR} | 16158C | Color sin # |
 
@@ -184,9 +184,11 @@ El script pregunta: nombre, acronimo, pais, ciudad, color. Ejecuta `03-create-mu
 
 ## Cloudflare R2 - Buckets Requeridos
 
-Cada municipio necesita 2 buckets (crear manualmente):
+Cada municipio usa 4 configuraciones de bucket en `settings` (crear los buckets manualmente):
 - `gdi-{acronym}-oficial` - Documentos oficiales firmados
 - `gdi-{acronym}-tosign` - Documentos pendientes de firma
+- `bucket_edicion` - Imagenes de documentos en edicion (por defecto reutiliza el bucket tosign, prefijo `images/`)
+- `gdi-{acronym}-publico` - PDFs de tipos de documento publicos (opcional, NULL = feature desactivada)
 
 ## Variables de Entorno
 
@@ -216,5 +218,5 @@ DATABASE_URL=postgresql://user:pass@host:port/railway
 
 ---
 
-**Version:** 7.0.0
-**Ultima actualizacion:** 2026-02-20
+**Version:** 7.1.0
+**Ultima actualizacion:** 2026-07-20
